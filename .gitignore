@@ -1,0 +1,13 @@
+/target/
+
+# Showcase: real captures and the generated comparison site are large
+# binaries — only the README is tracked
+/showcase/*
+!/showcase/README.md
+
+# Generated example output
+/examples/images/
+
+# Local tooling artifacts
+/logs/
+/.playwright-mcp/
