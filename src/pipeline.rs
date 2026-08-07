@@ -67,11 +67,14 @@ impl Default for PipelineConfig {
     }
 }
 
-/// Run the processing pipeline on raw FITS image data.
+/// The pre-stretch prefix of [`process`]: autocrop edge detection,
+/// normalization to [0, 1], optional gradient removal, renormalization.
 ///
-/// Returns the processed image normalized to [0, 1], same shape as the
-/// input.
-pub fn process(image: &Image, config: &PipelineConfig) -> Image {
+/// The result is what the stretch consumes — pass it to
+/// [`crate::stretch::stretch`] with `pre_normalized: true`, or hand it to a
+/// display stretch (e.g. astra's WebGL preview) together with
+/// [`crate::stretch::mtf_display_solution`].
+pub fn prepare(image: &Image, config: &PipelineConfig) -> Image {
     // Detect dark stacking edges once; use the interior for all statistics
     let crop: CropBounds = if config.autocrop {
         autocrop::detect_edges(image, &AutocropParams::default())
@@ -91,13 +94,20 @@ pub fn process(image: &Image, config: &PipelineConfig) -> Image {
                 ..Default::default()
             },
         );
-    }
-
-    // Gradient removal shifts the data range; renormalize so the stretch
-    // sees the full [0, 1] span (keeps bright stars near white)
-    if config.gradient_removal {
+        // Gradient removal shifts the data range; renormalize so the
+        // stretch sees the full [0, 1] span (keeps bright stars near white)
         result = stretch::normalize_to_01(&result, crop);
     }
+
+    result
+}
+
+/// Run the processing pipeline on raw FITS image data.
+///
+/// Returns the processed image normalized to [0, 1], same shape as the
+/// input.
+pub fn process(image: &Image, config: &PipelineConfig) -> Image {
+    let result = prepare(image, config);
 
     let mut stretched = stretch::stretch(
         &result,

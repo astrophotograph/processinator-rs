@@ -199,6 +199,126 @@ pub(crate) fn normalize_to_01(image: &Image, stats_bounds: CropBounds) -> Image 
 // MTF (Midtones Transfer Function) — brought over from astra
 // ---------------------------------------------------------------------------
 
+/// Order statistics driving an MTF stretch solution.
+///
+/// Parameter-independent: computed once per channel from the pre-stretch
+/// data, they determine the shadows and midtone for *any*
+/// `(bg_percent, sigma)` — which is what lets a GPU display path recompute
+/// the stretch per slider change without touching the pixels again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MtfStats {
+    /// Median of the valid samples.
+    pub median: f64,
+    /// Lower quartile of the valid samples.
+    pub p25: f64,
+    /// Median absolute deviation around the median.
+    pub mad: f64,
+    /// Number of valid samples the statistics were computed from.
+    /// 0 means the channel had no usable data and the stretch is a no-op.
+    pub count: usize,
+}
+
+/// The scalar solution an MTF stretch applies to the pixels:
+/// `v' = MTF(midtone, clamp((v - shadows[c]) * scale, 0, 1))`.
+///
+/// Produced by [`mtf_display_solution`]; the same values drive the CPU
+/// pipeline and any external (e.g. GPU shader) implementation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MtfSolution {
+    /// Per-channel shadow offset (one entry for mono).
+    pub shadows: Vec<f64>,
+    /// Common rescale applied after shadow subtraction.
+    pub scale: f64,
+    /// Shared midtone balance parameter.
+    pub midtone: f64,
+}
+
+/// Statistics for the linked (color) MTF path: positive samples only,
+/// MAD floored at 1e-6. A channel with no positive samples reports
+/// `{median: 0, p25: 0, mad: 0.01, count: 0}` (the historical fallback).
+pub fn mtf_stats_linked(data: &[f64]) -> MtfStats {
+    match stats_from_valid(data.iter().copied().filter(|&v| v > 0.0).collect()) {
+        Some((p25, median, mad, count)) => MtfStats {
+            median,
+            p25,
+            mad: mad.max(1e-6),
+            count,
+        },
+        None => MtfStats {
+            median: 0.0,
+            p25: 0.0,
+            mad: 0.01,
+            count: 0,
+        },
+    }
+}
+
+/// Statistics for the per-channel (mono/unlinked) MTF path: samples in
+/// (0, 1) exclusive, no MAD floor. `count == 0` means the stretch is a
+/// no-op for this channel.
+pub fn mtf_stats_channel(data: &[f64]) -> MtfStats {
+    match stats_from_valid(
+        data.iter()
+            .copied()
+            .filter(|&v| v > 0.0 && v < 1.0)
+            .collect(),
+    ) {
+        Some((p25, median, mad, count)) => MtfStats {
+            median,
+            p25,
+            mad,
+            count,
+        },
+        None => MtfStats {
+            median: 0.0,
+            p25: 0.0,
+            mad: 0.0,
+            count: 0,
+        },
+    }
+}
+
+/// (p25, median, mad, count) of the pre-filtered samples, or None if empty.
+fn stats_from_valid(mut valid: Vec<f64>) -> Option<(f64, f64, f64, usize)> {
+    if valid.is_empty() {
+        return None;
+    }
+    let count = valid.len();
+    let (p25, median) = stats::percentile_pair_in_place(&mut valid, 25.0, 50.0);
+    for v in valid.iter_mut() {
+        *v = (*v - median).abs();
+    }
+    let mad = stats::median_in_place(&mut valid);
+    Some((p25, median, mad, count))
+}
+
+/// Midtone balance that lands a background at `median` on `bg_percent`.
+fn midtone_for_background(median: f64, bg_percent: f64) -> f64 {
+    if median > 0.0 && median < 1.0 && bg_percent > 0.0 {
+        let m = median * (bg_percent - 1.0)
+            / (2.0 * bg_percent * median - bg_percent - median);
+        m.clamp(1e-4, 0.9999)
+    } else {
+        0.5
+    }
+}
+
+/// Compute the MTF solution the pipeline would apply to this pre-stretch
+/// image: the linked solution for color, the single-channel solution for
+/// mono. The input must already be normalized to [0, 1] (the output of
+/// [`crate::pipeline::prepare`]).
+///
+/// Applying `MTF(midtone, clamp((v - shadows[c]) * scale, 0, 1))` per pixel
+/// reproduces `StretchAlgorithm::Mtf { linked: true, .. }` exactly — this is
+/// the contract the WebGL display stretch in astra is built on.
+pub fn mtf_display_solution(image: &Image, bg_percent: f64, sigma: f64) -> MtfSolution {
+    if image.is_color() {
+        mtf_linked_solution(image.channels(), bg_percent, sigma)
+    } else {
+        mtf_channel_solution(image.channel(0), bg_percent, sigma)
+    }
+}
+
 fn stretch_mtf(image: &mut Image, bg_percent: f64, sigma: f64, linked: bool) {
     if linked && image.is_color() {
         stretch_mtf_linked(image.channels_mut(), bg_percent, sigma);
@@ -221,8 +341,18 @@ fn stretch_mtf(image: &mut Image, bg_percent: f64, sigma: f64, linked: bool) {
 /// per-channel background offset flattens the sky cast while leaving
 /// channel ratios (color) intact.
 fn stretch_mtf_linked(channels: &mut [Vec<f64>], bg_percent: f64, sigma: f64) {
+    let sol = mtf_linked_solution(channels, bg_percent, sigma);
+    channels.par_iter_mut().enumerate().for_each(|(i, ch)| {
+        apply_shadow_scale(ch, sol.shadows[i], sol.scale);
+        apply_mtf(ch, sol.midtone);
+    });
+}
+
+/// Solution for the linked path — see [`stretch_mtf_linked`]'s docs for the
+/// reasoning behind each step.
+fn mtf_linked_solution(channels: &[Vec<f64>], bg_percent: f64, sigma: f64) -> MtfSolution {
     // Step 1: Per-channel statistics
-    let stats: Vec<ChannelStats> = channels.par_iter().map(|ch| channel_stats(ch)).collect();
+    let stats: Vec<MtfStats> = channels.par_iter().map(|ch| mtf_stats_linked(ch)).collect();
 
     // Step 2: Shadow offsets that land every channel's median at the same
     // residual level, so the sky comes out neutral. Each channel's natural
@@ -242,33 +372,31 @@ fn stretch_mtf_linked(channels: &mut [Vec<f64>], bg_percent: f64, sigma: f64) {
         .map(|s| (s.median - residual).max(0.0))
         .collect();
 
-    // Step 3: Subtract the shadow offsets, with one common rescale so the
-    // channels keep their relative scale
+    // Step 3: One common rescale after shadow subtraction so the channels
+    // keep their relative scale
     let max_shadow = shadows.iter().copied().fold(0.0, f64::max);
     let scale = 1.0 / (1.0 - max_shadow).max(1e-6);
 
-    channels.par_iter_mut().enumerate().for_each(|(i, ch)| {
-        for v in ch.iter_mut() {
-            *v = ((*v - shadows[i]) * scale).clamp(0.0, 1.0);
-        }
-    });
-
-    // Step 4: Compute the shared midtone from the reference channel (green)
+    // Step 4: Shared midtone from the reference channel (green), as it
+    // looks after shadow subtraction
     let ref_idx = std::cmp::min(1, channels.len() - 1);
-    let ref_median = median_positive(&channels[ref_idx]);
-
-    let midtone = if ref_median > 0.0 && ref_median < 1.0 && bg_percent > 0.0 {
-        let m = ref_median * (bg_percent - 1.0)
-            / (2.0 * bg_percent * ref_median - bg_percent - ref_median);
-        m.clamp(1e-4, 0.9999)
+    let mut mapped: Vec<f64> = channels[ref_idx]
+        .iter()
+        .map(|&v| ((v - shadows[ref_idx]) * scale).clamp(0.0, 1.0))
+        .filter(|&v| v > 0.0)
+        .collect();
+    let ref_median = if mapped.is_empty() {
+        0.0
     } else {
-        0.5
+        stats::median_in_place(&mut mapped)
     };
+    let midtone = midtone_for_background(ref_median, bg_percent);
 
-    // Step 5: Apply the shared MTF to all channels
-    channels
-        .par_iter_mut()
-        .for_each(|ch| apply_mtf(ch, midtone));
+    MtfSolution {
+        shadows,
+        scale,
+        midtone,
+    }
 }
 
 /// SCNR-style green suppression (average-neutral): pull green down toward
@@ -316,42 +444,42 @@ pub fn saturate(image: &mut Image, factor: f64) {
 
 /// Unlinked mode (or grayscale): stretch one channel independently.
 fn stretch_mtf_channel(data: &mut [f64], bg_percent: f64, sigma: f64) {
-    let mut valid: Vec<f64> = data
-        .iter()
-        .copied()
-        .filter(|&v| v > 0.0 && v < 1.0)
-        .collect();
-    if valid.is_empty() {
-        return;
+    let sol = mtf_channel_solution(data, bg_percent, sigma);
+    apply_shadow_scale(data, sol.shadows[0], sol.scale);
+    apply_mtf(data, sol.midtone);
+}
+
+/// Solution for one independent channel. A channel with no valid samples
+/// gets the identity solution (shadow 0, scale 1, midtone 0.5 — MTF at
+/// 0.5 is the identity map).
+fn mtf_channel_solution(data: &[f64], bg_percent: f64, sigma: f64) -> MtfSolution {
+    let stats = mtf_stats_channel(data);
+    if stats.count == 0 {
+        return MtfSolution {
+            shadows: vec![0.0],
+            scale: 1.0,
+            midtone: 0.5,
+        };
     }
 
-    let (p25, median) = stats::percentile_pair_in_place(&mut valid, 25.0, 50.0);
-    for v in valid.iter_mut() {
-        *v = (*v - median).abs();
-    }
-    let mad = stats::median_in_place(&mut valid);
-
-    // Lower-quartile anchor — see stretch_mtf_linked for why not the median
-    let shadow_clip = (p25 - sigma * mad * 1.4826).max(0.0);
-    let highlight_clip = 1.0;
-    let range = highlight_clip - shadow_clip;
-    if range > 0.0 {
-        for v in data.iter_mut() {
-            *v = (v.clamp(shadow_clip, highlight_clip) - shadow_clip) / range;
-        }
-    }
+    // Lower-quartile anchor — see mtf_linked_solution for why not the median
+    let shadow_clip = (stats.p25 - sigma * stats.mad * 1.4826).max(0.0);
+    let range = 1.0 - shadow_clip;
 
     // Midtone balance that lands the background at bg_percent
-    let median_norm = (median - shadow_clip) / range;
-    let midtone = if median_norm > 0.0 && median_norm < 1.0 && bg_percent > 0.0 {
-        let m = median_norm * (bg_percent - 1.0)
-            / (2.0 * bg_percent * median_norm - bg_percent - median_norm);
-        m.clamp(1e-4, 0.9999)
-    } else {
-        0.5
-    };
+    let median_norm = (stats.median - shadow_clip) / range;
+    MtfSolution {
+        shadows: vec![shadow_clip],
+        scale: 1.0 / range,
+        midtone: midtone_for_background(median_norm, bg_percent),
+    }
+}
 
-    apply_mtf(data, midtone);
+/// `v' = clamp((v - shadow) * scale, 0, 1)` — the pre-MTF linear map.
+fn apply_shadow_scale(data: &mut [f64], shadow: f64, scale: f64) {
+    for v in data.iter_mut() {
+        *v = ((*v - shadow) * scale).clamp(0.0, 1.0);
+    }
 }
 
 /// MTF(m, x) = (m - 1) * x / ((2m - 1) * x - m)
@@ -369,39 +497,6 @@ fn apply_mtf(data: &mut [f64], m: f64) {
             (m_minus_1 * x / denom).clamp(0.0, 1.0)
         };
     }
-}
-
-struct ChannelStats {
-    median: f64,
-    p25: f64,
-    mad: f64,
-}
-
-/// Median, lower quartile, and MAD (around the median) of the positive
-/// samples.
-fn channel_stats(data: &[f64]) -> ChannelStats {
-    let mut valid: Vec<f64> = data.iter().copied().filter(|&v| v > 0.0).collect();
-    if valid.is_empty() {
-        return ChannelStats {
-            median: 0.0,
-            p25: 0.0,
-            mad: 0.01,
-        };
-    }
-    let (p25, median) = stats::percentile_pair_in_place(&mut valid, 25.0, 50.0);
-    for v in valid.iter_mut() {
-        *v = (*v - median).abs();
-    }
-    let mad = stats::median_in_place(&mut valid).max(1e-6);
-    ChannelStats { median, p25, mad }
-}
-
-fn median_positive(data: &[f64]) -> f64 {
-    let mut valid: Vec<f64> = data.iter().copied().filter(|&v| v > 0.0).collect();
-    if valid.is_empty() {
-        return 0.0;
-    }
-    stats::median_in_place(&mut valid)
 }
 
 // ---------------------------------------------------------------------------
