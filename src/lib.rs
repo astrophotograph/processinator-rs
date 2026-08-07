@@ -28,6 +28,7 @@
 
 pub mod autocrop;
 pub mod denoise;
+pub mod enhance;
 mod error;
 pub mod fits_io;
 pub mod gradient;
@@ -39,6 +40,7 @@ pub mod synthetic;
 
 pub use self::autocrop::{autocrop, detect_edges, AutocropParams, CropBounds};
 pub use self::denoise::{denoise, DenoiseParams, ThresholdMode};
+pub use self::enhance::{color_calibrate, contrast, reduce_stars};
 pub use self::error::Error;
 pub use self::fits_io::{fits_to_image, read_fits, to_dynamic_image, write_fits};
 pub use self::gradient::{remove_gradient, GradientParams};

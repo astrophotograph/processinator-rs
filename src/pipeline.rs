@@ -13,6 +13,7 @@
 
 use crate::autocrop::{self, AutocropParams, CropBounds};
 use crate::denoise::{self, DenoiseParams, ThresholdMode};
+use crate::enhance;
 use crate::gradient::{self, GradientParams};
 use crate::image::Image;
 use crate::stretch::{self, StretchAlgorithm, StretchOptions};
@@ -37,8 +38,17 @@ pub struct PipelineConfig {
     pub denoise_threshold: f64,
     /// Hard or soft thresholding.
     pub denoise_mode: ThresholdMode,
+    /// Corner-sampled background color neutralization before the stretch
+    /// (RGB only) — the Python processing flow's "color calibration".
+    pub color_calibration: bool,
     /// Stretch algorithm (with its parameters) to finish with.
     pub stretch: StretchAlgorithm,
+    /// Post-stretch mean-anchored contrast boost; 1.0 disables.
+    pub contrast: f64,
+    /// Post-stretch star dimming to emphasize nebulosity.
+    pub star_reduction: bool,
+    /// Luminance threshold for star detection (0-1).
+    pub star_threshold: f64,
     /// SCNR-style green suppression after the stretch, 0.0 (off) to 1.0
     /// (full). Deep-sky signal is almost never green; this removes the
     /// green cast OSC sensors leave behind.
@@ -60,7 +70,11 @@ impl Default for PipelineConfig {
             denoise_scales: 4,
             denoise_threshold: 3.0,
             denoise_mode: ThresholdMode::Hard,
+            color_calibration: false,
             stretch: StretchAlgorithm::default(),
+            contrast: 1.0,
+            star_reduction: false,
+            star_threshold: 0.8,
             green_removal: 1.0,
             saturation: 1.25,
         }
@@ -107,7 +121,13 @@ pub fn prepare(image: &Image, config: &PipelineConfig) -> Image {
 /// Returns the processed image normalized to [0, 1], same shape as the
 /// input.
 pub fn process(image: &Image, config: &PipelineConfig) -> Image {
-    let result = prepare(image, config);
+    let mut result = prepare(image, config);
+
+    // Color calibration operates on the linear (pre-stretch) data, after
+    // gradient removal — matching the Python processing flow's order
+    if config.color_calibration {
+        enhance::color_calibrate(&mut result);
+    }
 
     let mut stretched = stretch::stretch(
         &result,
@@ -140,6 +160,15 @@ pub fn process(image: &Image, config: &PipelineConfig) -> Image {
                 *v = v.clamp(0.0, 1.0);
             }
         }
+    }
+
+    // Post-stretch enhancements in the Python flow's order: contrast, then
+    // star reduction, before the color cosmetics
+    if config.contrast > 1.0 {
+        enhance::contrast(&mut stretched, config.contrast);
+    }
+    if config.star_reduction {
+        enhance::reduce_stars(&mut stretched, config.star_threshold);
     }
 
     stretch::remove_green(&mut stretched, config.green_removal);
