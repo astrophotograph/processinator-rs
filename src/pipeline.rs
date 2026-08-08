@@ -52,6 +52,13 @@ pub struct PipelineConfig {
     /// SCNR-style green suppression after the stretch, 0.0 (off) to 1.0
     /// (full). Deep-sky signal is almost never green; this removes the
     /// green cast OSC sensors leave behind.
+    ///
+    /// Full strength clamps G to mean(R, B) at every pixel where it's
+    /// higher — on a neutral background that clips half the green noise
+    /// distribution, dragging median G *below* the other channels and
+    /// tinting the whole sky magenta (amplified further by the saturation
+    /// boost). 0.5 takes out the green noise bias without flipping the
+    /// balance.
     pub green_removal: f64,
     /// Post-stretch saturation boost for color images (1.0 = off).
     /// Nonlinear stretches compress channel ratios; a modest boost restores
@@ -75,7 +82,7 @@ impl Default for PipelineConfig {
             contrast: 1.0,
             star_reduction: false,
             star_threshold: 0.8,
-            green_removal: 1.0,
+            green_removal: 0.5,
             saturation: 1.25,
         }
     }
