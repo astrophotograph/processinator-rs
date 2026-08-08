@@ -127,62 +127,63 @@ impl StretchOptions {
 /// Stretch image data from linear to nonlinear for display.
 ///
 /// Input values may be in their original FITS range; the output is
-/// normalized to [0, 1] with the same shape.
-pub fn stretch(image: &Image, options: &StretchOptions) -> Image {
-    let mut normalized = if options.pre_normalized {
-        image.clone()
-    } else {
+/// normalized to [0, 1] with the same shape. Consumes the input — full
+/// planes of a modern sensor run to hundreds of MB, so callers that need
+/// the original clone explicitly rather than paying for a hidden copy.
+pub fn stretch(mut image: Image, options: &StretchOptions) -> Image {
+    if !options.pre_normalized {
         // Detect dark stacking edges and compute normalization statistics
         // from the interior only; the full frame is kept so pixel
         // coordinates stay aligned with the FITS.
         let bounds = if options.autocrop {
-            autocrop::detect_edges(image, &AutocropParams::default())
+            autocrop::detect_edges(&image, &AutocropParams::default())
         } else {
             (0, 0, 0, 0)
         };
-        normalize_to_01(image, bounds)
-    };
+        normalize_to_01(&mut image, bounds);
+    }
 
     match options.algorithm {
         StretchAlgorithm::Mtf {
             bg_percent,
             sigma,
             linked,
-        } => stretch_mtf(&mut normalized, bg_percent, sigma, linked),
-        StretchAlgorithm::Arcsinh { factor } => stretch_arcsinh(&mut normalized, factor),
-        StretchAlgorithm::Log { factor } => stretch_log(&mut normalized, factor),
+        } => stretch_mtf(&mut image, bg_percent, sigma, linked),
+        StretchAlgorithm::Arcsinh { factor } => stretch_arcsinh(&mut image, factor),
+        StretchAlgorithm::Log { factor } => stretch_log(&mut image, factor),
         StretchAlgorithm::Linear {
             low_percentile,
             high_percentile,
-        } => stretch_linear(&mut normalized, low_percentile, high_percentile),
+        } => stretch_linear(&mut image, low_percentile, high_percentile),
         StretchAlgorithm::Statistical {
             target_median,
             low_percentile,
             high_percentile,
-        } => stretch_statistical(
-            &mut normalized,
-            target_median,
-            low_percentile,
-            high_percentile,
-        ),
+        } => stretch_statistical(&mut image, target_median, low_percentile, high_percentile),
     }
-    normalized
+    image
 }
 
-/// Normalize raw FITS data to [0, 1], per channel, with percentiles
-/// (0.1, 99.99) computed from the interior left by `stats_bounds`.
-/// Percentile clipping keeps hot pixels and bright stars from compressing
-/// the useful range; a constant channel comes back all zero.
-pub(crate) fn normalize_to_01(image: &Image, stats_bounds: CropBounds) -> Image {
-    let mut out = image.clone();
-    let interiors: Vec<Vec<f64>> = (0..image.num_channels())
-        .map(|c| image.channel_interior(c, stats_bounds))
+/// Normalize raw FITS data to [0, 1] in place, per channel, with
+/// percentiles (0.1, 99.99) computed from the interior left by
+/// `stats_bounds`. Percentile clipping keeps hot pixels and bright stars
+/// from compressing the useful range; a constant channel comes back all
+/// zero.
+pub(crate) fn normalize_to_01(image: &mut Image, stats_bounds: CropBounds) {
+    // One channel's interior scratch at a time — three parallel copies of
+    // a 26 MP plane is real memory; the selection is O(n) so the apply
+    // loop below dominates anyway
+    let ranges: Vec<(f64, f64)> = (0..image.num_channels())
+        .map(|c| {
+            let mut interior = image.channel_interior(c, stats_bounds);
+            stats::percentile_pair_in_place(&mut interior, 0.1, 99.99)
+        })
         .collect();
-    out.channels_mut()
+    image
+        .channels_mut()
         .par_iter_mut()
-        .zip(interiors)
-        .for_each(|(ch, mut interior)| {
-            let (vmin, vmax) = stats::percentile_pair_in_place(&mut interior, 0.1, 99.99);
+        .zip(ranges)
+        .for_each(|(ch, (vmin, vmax))| {
             let range = vmax - vmin;
             if range > 0.0 {
                 for v in ch.iter_mut() {
@@ -192,7 +193,6 @@ pub(crate) fn normalize_to_01(image: &Image, stats_bounds: CropBounds) -> Image 
                 ch.fill(0.0);
             }
         });
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -295,8 +295,7 @@ fn stats_from_valid(mut valid: Vec<f64>) -> Option<(f64, f64, f64, usize)> {
 /// Midtone balance that lands a background at `median` on `bg_percent`.
 fn midtone_for_background(median: f64, bg_percent: f64) -> f64 {
     if median > 0.0 && median < 1.0 && bg_percent > 0.0 {
-        let m = median * (bg_percent - 1.0)
-            / (2.0 * bg_percent * median - bg_percent - median);
+        let m = median * (bg_percent - 1.0) / (2.0 * bg_percent * median - bg_percent - median);
         m.clamp(1e-4, 0.9999)
     } else {
         0.5
@@ -540,6 +539,8 @@ fn stretch_linear(image: &mut Image, low_percentile: f64, high_percentile: f64) 
         .flat_map(|ch| ch.iter().copied())
         .collect();
     let (vmin, vmax) = stats::percentile_pair_in_place(&mut all, low_percentile, high_percentile);
+    // The flattened copy is a full extra image; release it before mutating
+    drop(all);
     let range = vmax - vmin;
     if range == 0.0 {
         return;
@@ -567,6 +568,8 @@ fn stretch_statistical(
         .flat_map(|ch| ch.iter().copied())
         .collect();
     let (vmin, vmax) = stats::percentile_pair_in_place(&mut all, low_percentile, high_percentile);
+    // The flattened copy is a full extra image; release it before mutating
+    drop(all);
     let range = vmax - vmin;
     if range == 0.0 {
         return;
@@ -589,6 +592,7 @@ fn stretch_statistical(
         return;
     }
     let current_median = stats::median_in_place(&mut positives);
+    drop(positives);
     if current_median > 0.0 && current_median != target_median {
         let gamma = (target_median.ln() / current_median.ln()).clamp(0.2, 5.0);
         image.channels_mut().par_iter_mut().for_each(|ch| {

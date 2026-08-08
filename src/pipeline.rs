@@ -88,20 +88,24 @@ impl Default for PipelineConfig {
 /// [`crate::stretch::stretch`] with `pre_normalized: true`, or hand it to a
 /// display stretch (e.g. astra's WebGL preview) together with
 /// [`crate::stretch::mtf_display_solution`].
-pub fn prepare(image: &Image, config: &PipelineConfig) -> Image {
+///
+/// Consumes the input and transforms it in place: full planes of a modern
+/// sensor run to hundreds of MB, so callers that need the original clone
+/// explicitly rather than paying for a hidden copy.
+pub fn prepare(mut image: Image, config: &PipelineConfig) -> Image {
     // Detect dark stacking edges once; use the interior for all statistics
     let crop: CropBounds = if config.autocrop {
-        autocrop::detect_edges(image, &AutocropParams::default())
+        autocrop::detect_edges(&image, &AutocropParams::default())
     } else {
         (0, 0, 0, 0)
     };
 
     // Normalize to [0, 1]; percentiles come from the interior
-    let mut result = stretch::normalize_to_01(image, crop);
+    stretch::normalize_to_01(&mut image, crop);
 
     if config.gradient_removal {
-        result = gradient::remove_gradient(
-            &result,
+        gradient::remove_gradient(
+            &mut image,
             &GradientParams {
                 order: config.gradient_order,
                 sigma_clip: config.gradient_sigma,
@@ -110,17 +114,17 @@ pub fn prepare(image: &Image, config: &PipelineConfig) -> Image {
         );
         // Gradient removal shifts the data range; renormalize so the
         // stretch sees the full [0, 1] span (keeps bright stars near white)
-        result = stretch::normalize_to_01(&result, crop);
+        stretch::normalize_to_01(&mut image, crop);
     }
 
-    result
+    image
 }
 
 /// Run the processing pipeline on raw FITS image data.
 ///
 /// Returns the processed image normalized to [0, 1], same shape as the
-/// input.
-pub fn process(image: &Image, config: &PipelineConfig) -> Image {
+/// input. Consumes the input (see [`prepare`]).
+pub fn process(image: Image, config: &PipelineConfig) -> Image {
     let mut result = prepare(image, config);
 
     // Color calibration operates on the linear (pre-stretch) data, after
@@ -130,7 +134,7 @@ pub fn process(image: &Image, config: &PipelineConfig) -> Image {
     }
 
     let mut stretched = stretch::stretch(
-        &result,
+        result,
         &StretchOptions {
             algorithm: config.stretch.clone(),
             autocrop: false,

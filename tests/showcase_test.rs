@@ -47,7 +47,7 @@ fn real_images_survive_full_pipeline() {
 
     for path in files {
         let data = read_fits(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let out = process(&data, &config);
+        let out = process(data.clone(), &config);
 
         assert_eq!(
             out.width(),

@@ -240,7 +240,7 @@ fn process_target(fits_path: &Path, img_dir: &Path) -> Result<TargetResult, Stri
     let mut variants = Vec::new();
     for spec in variant_specs() {
         let t = Instant::now();
-        let processed = process(&data, &spec.config);
+        let processed = process(data.clone(), &spec.config);
         let img = to_dynamic_image(&processed);
         let pipeline_ms = t.elapsed().as_secs_f64() * 1e3;
 

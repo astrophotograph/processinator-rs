@@ -70,9 +70,9 @@ fn max_abs_diff(a: &Image, b: &Image) -> f64 {
 fn shader_path_matches_pipeline_rgb() {
     let field = common::rgb_field();
     let cfg = config(BG, SIGMA);
-    let expected = process(&field.data, &cfg);
+    let expected = process(field.data.clone(), &cfg);
 
-    let prepared = prepare(&field.data, &cfg);
+    let prepared = prepare(field.data.clone(), &cfg);
     let sol = mtf_display_solution(&prepared, BG, SIGMA);
     let actual = shader_stretch(&prepared, &sol, &cfg);
 
@@ -84,9 +84,9 @@ fn shader_path_matches_pipeline_rgb() {
 fn shader_path_matches_pipeline_mono() {
     let field = common::gradient_field();
     let cfg = config(BG, SIGMA);
-    let expected = process(&field.data, &cfg);
+    let expected = process(field.data.clone(), &cfg);
 
-    let prepared = prepare(&field.data, &cfg);
+    let prepared = prepare(field.data.clone(), &cfg);
     let sol = mtf_display_solution(&prepared, BG, SIGMA);
     let actual = shader_stretch(&prepared, &sol, &cfg);
 
@@ -99,11 +99,11 @@ fn prepare_then_stretch_equals_process() {
     // prepare() must stay the exact pre-stretch prefix of process()
     let field = common::rgb_field();
     let cfg = config(BG, SIGMA);
-    let expected = process(&field.data, &cfg);
+    let expected = process(field.data.clone(), &cfg);
 
-    let prepared = prepare(&field.data, &cfg);
+    let prepared = prepare(field.data.clone(), &cfg);
     let stretched = processinator::stretch(
-        &prepared,
+        prepared.clone(),
         &processinator::StretchOptions {
             algorithm: cfg.stretch.clone(),
             autocrop: false,
@@ -170,8 +170,7 @@ fn conditional_median(hist: &[u32], threshold: f64) -> Option<f64> {
 
 fn midtone_for_background(median: f64, bg_percent: f64) -> f64 {
     if median > 0.0 && median < 1.0 && bg_percent > 0.0 {
-        let m = median * (bg_percent - 1.0)
-            / (2.0 * bg_percent * median - bg_percent - median);
+        let m = median * (bg_percent - 1.0) / (2.0 * bg_percent * median - bg_percent - median);
         m.clamp(1e-4, 0.9999)
     } else {
         0.5
@@ -232,7 +231,7 @@ fn frontend_mono_solution(stats: &MtfStats, bg_percent: f64, sigma: f64) -> MtfS
 fn frontend_solution_matches_exact_rgb() {
     let field = common::rgb_field();
     let cfg = config(BG, SIGMA);
-    let prepared = prepare(&field.data, &cfg);
+    let prepared = prepare(field.data.clone(), &cfg);
 
     let stats: Vec<MtfStats> = prepared
         .channels()
@@ -241,7 +240,13 @@ fn frontend_solution_matches_exact_rgb() {
         .collect();
     let hist = histogram(prepared.channel(1));
 
-    for (bg, sigma) in [(0.10, 3.0), (0.15, 3.0), (0.25, 2.0), (0.40, 1.0), (0.15, 0.0)] {
+    for (bg, sigma) in [
+        (0.10, 3.0),
+        (0.15, 3.0),
+        (0.25, 2.0),
+        (0.40, 1.0),
+        (0.15, 0.0),
+    ] {
         let exact = mtf_display_solution(&prepared, bg, sigma);
         let front = frontend_linked_solution(&stats, &hist, bg, sigma);
 
@@ -272,7 +277,7 @@ fn frontend_solution_matches_exact_rgb() {
 fn frontend_solution_matches_exact_mono() {
     let field = common::mono_field();
     let cfg = config(BG, SIGMA);
-    let prepared = prepare(&field.data, &cfg);
+    let prepared = prepare(field.data.clone(), &cfg);
 
     let stats = mtf_stats_channel(prepared.channel(0));
 

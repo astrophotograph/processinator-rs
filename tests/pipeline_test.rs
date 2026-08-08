@@ -23,7 +23,7 @@ fn full_frame() -> SyntheticImage {
 #[test]
 fn default_config() {
     let frame = full_frame();
-    let result = process(&frame.data, &PipelineConfig::default());
+    let result = process(frame.data.clone(), &PipelineConfig::default());
     assert_eq!(result.width(), frame.data.width());
     assert_eq!(result.height(), frame.data.height());
     assert_eq!(result.num_channels(), frame.data.num_channels());
@@ -37,7 +37,7 @@ fn all_steps_enabled() {
         denoise: true,
         ..Default::default()
     };
-    let result = process(&frame.data, &config);
+    let result = process(frame.data.clone(), &config);
     assert_eq!(result.width(), frame.data.width());
     assert_eq!(result.height(), frame.data.height());
     assert_unit_range(&result);
@@ -54,7 +54,7 @@ fn all_steps_disabled() {
         denoise: false,
         ..Default::default()
     };
-    let result = process(&field.data, &config);
+    let result = process(field.data.clone(), &config);
     assert_eq!(result.width(), field.data.width());
     assert_eq!(result.height(), field.data.height());
     assert_unit_range(&result);
@@ -65,7 +65,7 @@ fn all_steps_disabled() {
 #[test]
 fn linked_mtf_neutralizes_color_cast() {
     let frame = full_frame();
-    let result = process(&frame.data, &PipelineConfig::default());
+    let result = process(frame.data.clone(), &PipelineConfig::default());
     let w = result.width();
     let h = result.height();
     let medians: Vec<f64> = (0..3)
@@ -89,14 +89,14 @@ fn linked_mtf_neutralizes_color_cast() {
 fn denoise_smooths_output() {
     let frame = full_frame();
     let plain = process(
-        &frame.data,
+        frame.data.clone(),
         &PipelineConfig {
             denoise: false,
             ..Default::default()
         },
     );
     let smoothed = process(
-        &frame.data,
+        frame.data.clone(),
         &PipelineConfig {
             denoise: true,
             ..Default::default()
@@ -125,7 +125,7 @@ fn alternate_algorithm() {
         stretch: StretchAlgorithm::arcsinh(),
         ..Default::default()
     };
-    let result = process(&field.data, &config);
+    let result = process(field.data.clone(), &config);
     assert_unit_range(&result);
 }
 
@@ -140,7 +140,7 @@ fn stretch_params_passthrough() {
         },
         ..Default::default()
     };
-    let bright = process(&field.data, &with_bg(0.4));
-    let dim = process(&field.data, &with_bg(0.05));
+    let bright = process(field.data.clone(), &with_bg(0.4));
+    let dim = process(field.data.clone(), &with_bg(0.05));
     assert!(image_median(&bright) > image_median(&dim));
 }

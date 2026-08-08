@@ -49,7 +49,7 @@ fn all_algorithms() -> Vec<StretchAlgorithm> {
 fn output_range_grayscale() {
     let img = grayscale_image();
     for algo in all_algorithms() {
-        let result = stretch(&img, &StretchOptions::new(algo.clone()));
+        let result = stretch(img.clone(), &StretchOptions::new(algo.clone()));
         assert_unit_range(&result);
     }
 }
@@ -58,7 +58,7 @@ fn output_range_grayscale() {
 fn output_range_rgb() {
     let img = rgb_image();
     for algo in all_algorithms() {
-        let result = stretch(&img, &StretchOptions::new(algo.clone()));
+        let result = stretch(img.clone(), &StretchOptions::new(algo.clone()));
         assert_unit_range(&result);
     }
 }
@@ -69,7 +69,7 @@ fn output_range_rgb() {
 fn shape_preserved_grayscale() {
     let img = grayscale_image();
     for algo in all_algorithms() {
-        let result = stretch(&img, &StretchOptions::new(algo));
+        let result = stretch(img.clone(), &StretchOptions::new(algo));
         assert_eq!(result.width(), img.width());
         assert_eq!(result.height(), img.height());
         assert_eq!(result.num_channels(), img.num_channels());
@@ -80,7 +80,7 @@ fn shape_preserved_grayscale() {
 fn shape_preserved_rgb() {
     let img = rgb_image();
     for algo in all_algorithms() {
-        let result = stretch(&img, &StretchOptions::new(algo));
+        let result = stretch(img.clone(), &StretchOptions::new(algo));
         assert_eq!(result.width(), img.width());
         assert_eq!(result.height(), img.height());
         assert_eq!(result.num_channels(), 3);
@@ -91,7 +91,7 @@ fn shape_preserved_rgb() {
 
 #[test]
 fn mtf_reveals_background() {
-    let result = stretch(&grayscale_image(), &StretchOptions::default());
+    let result = stretch(grayscale_image(), &StretchOptions::default());
     // After MTF stretch, the median should be closer to bg_percent (0.15)
     let median = image_median(&result);
     assert!(median > 0.01 && median < 0.5, "median = {median}");
@@ -100,7 +100,7 @@ fn mtf_reveals_background() {
 #[test]
 fn linear_uses_percentiles() {
     let result = stretch(
-        &grayscale_image(),
+        grayscale_image(),
         &StretchOptions::new(StretchAlgorithm::linear()),
     );
     // Most values should be in the middle range after linear stretch
@@ -110,15 +110,15 @@ fn linear_uses_percentiles() {
 #[test]
 fn constant_image_produces_zeros() {
     let img = Image::new_mono(64, 64, vec![1000.0; 64 * 64]);
-    let result = stretch(&img, &StretchOptions::default());
+    let result = stretch(img.clone(), &StretchOptions::default());
     assert!(result.channel(0).iter().all(|&v| v == 0.0));
 }
 
 #[test]
 fn default_algorithm_is_mtf() {
     let img = grayscale_image();
-    let default_result = stretch(&img, &StretchOptions::default());
-    let mtf_result = stretch(&img, &StretchOptions::new(StretchAlgorithm::mtf()));
+    let default_result = stretch(img.clone(), &StretchOptions::default());
+    let mtf_result = stretch(img.clone(), &StretchOptions::new(StretchAlgorithm::mtf()));
     assert_eq!(default_result, mtf_result);
 }
 
@@ -151,7 +151,7 @@ fn linked_mtf_preserves_nebula_color() {
     let [r, g, b] = channels;
     let img = Image::new_rgb(w, h, [r, g, b]);
 
-    let result = stretch(&img, &StretchOptions::default());
+    let result = stretch(img.clone(), &StretchOptions::default());
     let nebula_mean = |c: usize| {
         let ch = result.channel(c);
         let mut sum = 0.0;

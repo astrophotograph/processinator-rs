@@ -34,28 +34,26 @@ impl Default for GradientParams {
     }
 }
 
-/// Remove the background gradient from each channel.
+/// Remove the background gradient from each channel, in place.
 ///
 /// Expects data in the [0, 1] range; the output is clipped back to [0, 1]
 /// with the darkest background region shifted near zero.
-pub fn remove_gradient(image: &Image, params: &GradientParams) -> Image {
+///
+/// Channels are processed sequentially on purpose: each one needs a
+/// full-plane scratch copy for the background percentile, and the
+/// row-level parallelism inside a channel already saturates the cores —
+/// running channels in parallel would only triple the scratch memory.
+pub fn remove_gradient(image: &mut Image, params: &GradientParams) {
     let w = image.width();
     let h = image.height();
-    let channels: Vec<Vec<f64>> = image
-        .channels()
-        .par_iter()
-        .map(|ch| remove_gradient_channel(ch, w, h, params))
-        .collect();
-    Image::from_channels(w, h, channels)
+    for ch in image.channels_mut() {
+        remove_gradient_channel(ch, w, h, params);
+    }
 }
 
-/// Remove the gradient from a single row-major channel.
-fn remove_gradient_channel(
-    data: &[f64],
-    width: usize,
-    height: usize,
-    params: &GradientParams,
-) -> Vec<f64> {
+/// Remove the gradient from a single row-major channel, in place. A
+/// degenerate background fit leaves the channel untouched.
+fn remove_gradient_channel(data: &mut [f64], width: usize, height: usize, params: &GradientParams) {
     let sample_grid = params.sample_grid.max(2);
     let order = params.order;
 
@@ -126,7 +124,7 @@ fn remove_gradient_channel(
 
     let coeffs = match lstsq(&terms, &sample_v, n_terms) {
         Some(c) => c,
-        None => return data.to_vec(),
+        None => return,
     };
 
     // Evaluate the model at reduced resolution — a low-order polynomial is
@@ -151,44 +149,40 @@ fn remove_gradient_channel(
         }
     }
 
-    // Bilinear upsample to full resolution and subtract (parallel by row)
+    // Bilinear upsample to full resolution and subtract in place
+    // (parallel by row)
     let es_f = (eval_size - 1) as f64;
-    let mut result: Vec<f64> = (0..height)
-        .into_par_iter()
-        .flat_map_iter(|y| {
-            let sy = y as f64 / h_max * es_f;
-            let sy0 = sy.floor() as usize;
-            let sy1 = std::cmp::min(sy0 + 1, eval_size - 1);
-            let fy = sy - sy0 as f64;
-            let fy_inv = 1.0 - fy;
-            let small = &small_model;
+    data.par_chunks_mut(width).enumerate().for_each(|(y, row)| {
+        let sy = y as f64 / h_max * es_f;
+        let sy0 = sy.floor() as usize;
+        let sy1 = std::cmp::min(sy0 + 1, eval_size - 1);
+        let fy = sy - sy0 as f64;
+        let fy_inv = 1.0 - fy;
+        let small = &small_model;
 
-            (0..width).map(move |x| {
-                let sx = x as f64 / w_max * es_f;
-                let sx0 = sx.floor() as usize;
-                let sx1 = std::cmp::min(sx0 + 1, eval_size - 1);
-                let fx = sx - sx0 as f64;
+        for (x, v) in row.iter_mut().enumerate() {
+            let sx = x as f64 / w_max * es_f;
+            let sx0 = sx.floor() as usize;
+            let sx1 = std::cmp::min(sx0 + 1, eval_size - 1);
+            let fx = sx - sx0 as f64;
 
-                let model_val = small[sy0 * eval_size + sx0] * (1.0 - fx) * fy_inv
-                    + small[sy0 * eval_size + sx1] * fx * fy_inv
-                    + small[sy1 * eval_size + sx0] * (1.0 - fx) * fy
-                    + small[sy1 * eval_size + sx1] * fx * fy;
+            let model_val = small[sy0 * eval_size + sx0] * (1.0 - fx) * fy_inv
+                + small[sy0 * eval_size + sx1] * fx * fy_inv
+                + small[sy1 * eval_size + sx0] * (1.0 - fx) * fy
+                + small[sy1 * eval_size + sx1] * fx * fy;
 
-                data[y * width + x] - model_val
-            })
-        })
-        .collect();
+            *v -= model_val;
+        }
+    });
 
     // Shift so the darkest background region (1st percentile) sits near zero
-    let mut scratch = result.clone();
+    let mut scratch = data.to_vec();
     let bg_level = stats::percentile_in_place(&mut scratch, 1.0);
     drop(scratch);
 
-    result.par_iter_mut().for_each(|v| {
+    data.par_iter_mut().for_each(|v| {
         *v = (*v - bg_level).clamp(0.0, 1.0);
     });
-
-    result
 }
 
 /// Polynomial term columns up to `order`; for order 2:

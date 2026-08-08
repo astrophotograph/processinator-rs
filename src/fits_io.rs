@@ -74,11 +74,17 @@ fn image_from_planar(shape: &[usize], mut pixels: Vec<f64>) -> Result<Image, Err
         let g = pixels.split_off(plane);
         let mut r = pixels;
         r.truncate(plane);
+        // truncate keeps the full 3-plane capacity behind the red channel
+        // — ~400 MB dead weight on a 26 MP frame, held for the whole
+        // pipeline. Same for any over-length tail on blue.
+        r.shrink_to_fit();
         let mut b = b;
         b.truncate(plane);
+        b.shrink_to_fit();
         Ok(Image::new_rgb(width, height, [r, g, b]))
     } else {
         pixels.truncate(plane);
+        pixels.shrink_to_fit();
         Ok(Image::new_mono(width, height, pixels))
     }
 }
@@ -118,7 +124,7 @@ pub fn fits_to_image(
     config: &PipelineConfig,
 ) -> Result<DynamicImage, Error> {
     let data = read_fits(fits_path)?;
-    let stretched = pipeline::process(&data, config);
+    let stretched = pipeline::process(data, config);
     let img = to_dynamic_image(&stretched);
 
     if let Some(out) = output_path {

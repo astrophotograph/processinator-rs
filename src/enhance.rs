@@ -234,11 +234,7 @@ mod tests {
     fn color_calibrate_neutralizes_corner_cast() {
         // Flat background with a strong red cast
         let n = 64 * 64;
-        let mut img = Image::new_rgb(
-            64,
-            64,
-            [vec![0.4; n], vec![0.2; n], vec![0.1; n]],
-        );
+        let mut img = Image::new_rgb(64, 64, [vec![0.4; n], vec![0.2; n], vec![0.1; n]]);
         color_calibrate(&mut img);
         let bg = |c: usize| img.get(2, 2, c);
         assert!((bg(0) - bg(1)).abs() < 1e-9);

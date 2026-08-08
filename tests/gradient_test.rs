@@ -29,7 +29,8 @@ fn background_tilt(img: &Image) -> f64 {
 fn flattens_background() {
     let field = gradient_field();
     let data = scaled(&field.data, 1.0 / image_max(&field.data));
-    let result = remove_gradient(&data, &GradientParams::default());
+    let mut result = data.clone();
+    remove_gradient(&mut result, &GradientParams::default());
     assert!(background_tilt(&result) < 0.35 * background_tilt(&data));
 }
 
@@ -38,7 +39,8 @@ fn flattens_background() {
 fn no_gradient_is_gentle() {
     let field = mono_field();
     let data = scaled(&field.data, 1.0 / image_max(&field.data));
-    let result = remove_gradient(&data, &GradientParams::default());
+    let mut result = data.clone();
+    remove_gradient(&mut result, &GradientParams::default());
     // The output is background-shifted toward 0 but should stay flat
     assert!(background_tilt(&result) < background_tilt(&data) + 0.01);
 }
@@ -49,7 +51,8 @@ fn stars_survive() {
     let field = gradient_field();
     let scale = image_max(&field.data);
     let data = scaled(&field.data, 1.0 / scale);
-    let result = remove_gradient(&data, &GradientParams::default());
+    let mut result = data.clone();
+    remove_gradient(&mut result, &GradientParams::default());
 
     let bright: Vec<_> = field
         .stars
@@ -92,7 +95,8 @@ fn shape_preserved_mono_and_rgb() {
             ..Default::default()
         });
         let data = scaled(&img.data, 1.0 / image_max(&img.data));
-        let result = remove_gradient(&data, &GradientParams::default());
+        let mut result = data.clone();
+        remove_gradient(&mut result, &GradientParams::default());
         assert_eq!(result.width(), data.width());
         assert_eq!(result.height(), data.height());
         assert_eq!(result.num_channels(), data.num_channels());
@@ -103,6 +107,7 @@ fn shape_preserved_mono_and_rgb() {
 fn output_clipped_to_unit_range() {
     let field = gradient_field();
     let data = scaled(&field.data, 1.0 / image_max(&field.data));
-    let result = remove_gradient(&data, &GradientParams::default());
+    let mut result = data.clone();
+    remove_gradient(&mut result, &GradientParams::default());
     assert_unit_range(&result);
 }
