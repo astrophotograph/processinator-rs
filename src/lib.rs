@@ -45,7 +45,7 @@ pub use self::error::Error;
 pub use self::fits_io::{fits_to_image, read_fits, to_dynamic_image, write_fits};
 pub use self::gradient::{remove_gradient, GradientParams};
 pub use self::image::Image;
-pub use self::pipeline::{prepare, process, PipelineConfig};
+pub use self::pipeline::{prepare, prepare_with_bounds, process, PipelineConfig};
 pub use self::stretch::{
     mtf_display_solution, mtf_stats_channel, mtf_stats_linked, remove_green, saturate, stretch,
     MtfSolution, MtfStats, StretchAlgorithm, StretchOptions,

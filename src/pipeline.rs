@@ -38,8 +38,9 @@ pub struct PipelineConfig {
     pub denoise_threshold: f64,
     /// Hard or soft thresholding.
     pub denoise_mode: ThresholdMode,
-    /// Corner-sampled background color neutralization before the stretch
-    /// (RGB only) — the Python processing flow's "color calibration".
+    /// Interior-sampled, offset-only background color neutralization
+    /// before the stretch (RGB only) — the Python processing flow's "color
+    /// calibration" (see [`crate::enhance::color_calibrate`]).
     pub color_calibration: bool,
     /// Stretch algorithm (with its parameters) to finish with.
     pub stretch: StretchAlgorithm,
@@ -99,7 +100,14 @@ impl Default for PipelineConfig {
 /// Consumes the input and transforms it in place: full planes of a modern
 /// sensor run to hundreds of MB, so callers that need the original clone
 /// explicitly rather than paying for a hidden copy.
-pub fn prepare(mut image: Image, config: &PipelineConfig) -> Image {
+pub fn prepare(image: Image, config: &PipelineConfig) -> Image {
+    prepare_with_bounds(image, config).0
+}
+
+/// [`prepare`], also returning the dark-edge bounds it detected (all
+/// zeros when autocrop is off) so later stages can keep sampling the
+/// interior.
+pub fn prepare_with_bounds(mut image: Image, config: &PipelineConfig) -> (Image, CropBounds) {
     // Detect dark stacking edges once; use the interior for all statistics
     let crop: CropBounds = if config.autocrop {
         autocrop::detect_edges(&image, &AutocropParams::default())
@@ -124,7 +132,7 @@ pub fn prepare(mut image: Image, config: &PipelineConfig) -> Image {
         stretch::normalize_to_01(&mut image, crop);
     }
 
-    image
+    (image, crop)
 }
 
 /// Run the processing pipeline on raw FITS image data.
@@ -132,12 +140,13 @@ pub fn prepare(mut image: Image, config: &PipelineConfig) -> Image {
 /// Returns the processed image normalized to [0, 1], same shape as the
 /// input. Consumes the input (see [`prepare`]).
 pub fn process(image: Image, config: &PipelineConfig) -> Image {
-    let mut result = prepare(image, config);
+    let (mut result, crop) = prepare_with_bounds(image, config);
 
     // Color calibration operates on the linear (pre-stretch) data, after
-    // gradient removal — matching the Python processing flow's order
+    // gradient removal — matching the Python processing flow's order — and
+    // samples the same interior every other statistic uses
     if config.color_calibration {
-        enhance::color_calibrate(&mut result);
+        enhance::color_calibrate(&mut result, crop);
     }
 
     let mut stretched = stretch::stretch(

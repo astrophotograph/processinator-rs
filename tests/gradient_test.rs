@@ -111,3 +111,28 @@ fn output_clipped_to_unit_range() {
     remove_gradient(&mut result, &GradientParams::default());
     assert_unit_range(&result);
 }
+
+/// A dark lane (dust) below the sky must keep its depth and must not be
+/// clamped to zero: the surface is subtracted by its shape only.
+#[test]
+fn dark_lane_keeps_its_depth_and_is_not_crushed() {
+    let (w, h) = (128usize, 128usize);
+    let mut data = vec![0.0; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let sky = 0.30 + 0.12 * x as f64 / (w - 1) as f64 + 0.05 * y as f64 / (h - 1) as f64;
+            let lane = if (50..70).contains(&y) { 0.85 } else { 1.0 };
+            data[y * w + x] = sky * lane;
+        }
+    }
+    let mut img = Image::new_mono(w, h, data);
+    remove_gradient(&mut img, &GradientParams::default());
+    let ch = img.channel(0);
+    let lane: Vec<f64> = (55..65).flat_map(|y| ch[y * w..(y + 1) * w].to_vec()).collect();
+    let sky: Vec<f64> = (90..100).flat_map(|y| ch[y * w..(y + 1) * w].to_vec()).collect();
+    let (lane_med, sky_med) = (median(&lane), median(&sky));
+    assert!(sky_med > 0.2, "background level kept, not re-zeroed: {sky_med}");
+    assert!(lane_med > 0.05, "lane must not be clamped to black: {lane_med}");
+    let depth = (sky_med - lane_med) / sky_med;
+    assert!((depth - 0.15).abs() < 0.05, "lane depth {depth} drifted from 0.15");
+}

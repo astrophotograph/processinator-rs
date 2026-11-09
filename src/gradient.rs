@@ -36,7 +36,9 @@ impl Default for GradientParams {
 
 /// Remove the background gradient from each channel, in place.
 ///
-/// Expects data in the [0, 1] range; the output is clipped back to [0, 1]
+/// Expects data in the [0, 1] range; the output is clipped back to [0, 1].
+/// Only the gradient's shape is removed — the background keeps its lowest
+/// level, so the darkest real structure is not clamped away
 /// with the darkest background region shifted near zero.
 ///
 /// Channels are processed sequentially on purpose: each one needs a
@@ -95,8 +97,15 @@ fn remove_gradient_channel(data: &mut [f64], width: usize, height: usize, params
         if std_est < 1e-10 {
             break;
         }
+        // Bright outliers (stars, nebulosity) are clipped at sigma_clip;
+        // dark samples get twice the room — a dark lane is still sky for
+        // the purposes of the surface and rejecting it would bend the fit
+        // toward whatever is left
         let limit = params.sigma_clip * std_est;
-        let mask: Vec<bool> = sample_v.iter().map(|v| (v - med).abs() < limit).collect();
+        let mask: Vec<bool> = sample_v
+            .iter()
+            .map(|v| v - med < limit && med - v < 2.0 * limit)
+            .collect();
         if mask.iter().filter(|&&m| m).count() < 6 {
             break;
         }
@@ -149,6 +158,16 @@ fn remove_gradient_channel(data: &mut [f64], width: usize, height: usize, params
         }
     }
 
+    // Subtract only the model's *shape*: re-centre the surface on the
+    // clipped samples' median so the sky stays at its own level instead of
+    // being re-zeroed afterwards. The old re-zero at the 1st percentile
+    // (with a clamp) sent the darkest 1% of the frame — dark nebulosity —
+    // to 0; the stretch picks its own black point later.
+    let pedestal = stats::median_of(&sample_v);
+    for v in small_model.iter_mut() {
+        *v -= pedestal;
+    }
+
     // Bilinear upsample to full resolution and subtract in place
     // (parallel by row)
     let es_f = (eval_size - 1) as f64;
@@ -171,17 +190,8 @@ fn remove_gradient_channel(data: &mut [f64], width: usize, height: usize, params
                 + small[sy1 * eval_size + sx0] * (1.0 - fx) * fy
                 + small[sy1 * eval_size + sx1] * fx * fy;
 
-            *v -= model_val;
+            *v = (*v - model_val).clamp(0.0, 1.0);
         }
-    });
-
-    // Shift so the darkest background region (1st percentile) sits near zero
-    let mut scratch = data.to_vec();
-    let bg_level = stats::percentile_in_place(&mut scratch, 1.0);
-    drop(scratch);
-
-    data.par_iter_mut().for_each(|v| {
-        *v = (*v - bg_level).clamp(0.0, 1.0);
     });
 }
 

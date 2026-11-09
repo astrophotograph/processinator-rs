@@ -556,6 +556,19 @@ fn stretch_linear(image: &mut Image, low_percentile: f64, high_percentile: f64) 
 // Statistical stretch (gamma correction)
 // ---------------------------------------------------------------------------
 
+/// "Statistical" stretch: a target-median stretch anchored like the MTF
+/// route. The black point is the lower quartile minus `STATISTICAL_SIGMA`
+/// noise widths (pooled over all channels so color is preserved), floored
+/// at `low_percentile`; the white point is `high_percentile`; and the
+/// midtone transfer function — not a power law — lands the median on
+/// `target_median`.
+///
+/// The earlier form clipped at the low percentile and then applied one
+/// global gamma to force the median to the target. A power law lifts the
+/// whole shadow range together, so the sky and the dark lanes just below
+/// it ended up at nearly the same gray: washed-out dark nebulosity. The
+/// MTF keeps its slope at the shadows, which is why the live-preview
+/// stretch looked punchier than Process on the same frame.
 fn stretch_statistical(
     image: &mut Image,
     target_median: f64,
@@ -567,38 +580,31 @@ fn stretch_statistical(
         .iter()
         .flat_map(|ch| ch.iter().copied())
         .collect();
-    let (vmin, vmax) = stats::percentile_pair_in_place(&mut all, low_percentile, high_percentile);
+    let (floor, white) = stats::percentile_pair_in_place(&mut all, low_percentile, high_percentile);
+    let pooled = mtf_stats_linked(&all);
     // The flattened copy is a full extra image; release it before mutating
     drop(all);
-    let range = vmax - vmin;
-    if range == 0.0 {
+    if pooled.count == 0 {
         return;
     }
+
+    let shadow = (pooled.p25 - STATISTICAL_SIGMA * 1.4826 * pooled.mad)
+        .max(floor)
+        .max(0.0);
+    let range = white - shadow;
+    if range <= 0.0 {
+        return;
+    }
+    let scale = 1.0 / range;
+    let median_norm = ((pooled.median - shadow) * scale).clamp(0.0, 1.0);
+    let midtone = midtone_for_background(median_norm, target_median);
 
     image.channels_mut().par_iter_mut().for_each(|ch| {
-        for v in ch.iter_mut() {
-            *v = ((*v - vmin) / range).clamp(0.0, 1.0);
-        }
+        apply_shadow_scale(ch, shadow, scale);
+        apply_mtf(ch, midtone);
     });
-
-    // Gamma correction to bring the median of the clipped result to target
-    let mut positives: Vec<f64> = image
-        .channels()
-        .iter()
-        .flat_map(|ch| ch.iter().copied())
-        .filter(|&v| v > 0.0)
-        .collect();
-    if positives.is_empty() {
-        return;
-    }
-    let current_median = stats::median_in_place(&mut positives);
-    drop(positives);
-    if current_median > 0.0 && current_median != target_median {
-        let gamma = (target_median.ln() / current_median.ln()).clamp(0.2, 5.0);
-        image.channels_mut().par_iter_mut().for_each(|ch| {
-            for v in ch.iter_mut() {
-                *v = v.powf(gamma).clamp(0.0, 1.0);
-            }
-        });
-    }
 }
+
+/// Noise widths below the lower quartile where the statistical stretch
+/// puts its black point — the MTF route's default sigma.
+const STATISTICAL_SIGMA: f64 = 3.0;

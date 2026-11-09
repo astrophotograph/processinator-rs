@@ -9,6 +9,7 @@
 
 use rayon::prelude::*;
 
+use crate::autocrop::CropBounds;
 use crate::image::Image;
 use crate::stats;
 
@@ -36,57 +37,65 @@ pub fn contrast(image: &mut Image, strength: f64) {
     });
 }
 
-/// Background color neutralization for RGB images: sample the four frame
-/// corners, take each channel's median, and rescale channels so their
-/// backgrounds meet at the mean level. Mono images are returned untouched.
-pub fn color_calibrate(image: &mut Image) {
+/// Background color neutralization for RGB images: bring every channel's
+/// sky to the same level by **offset**, never by gain.
+///
+/// The sky is each channel's median over the autocrop interior (`bounds`,
+/// as [`crate::autocrop::detect_edges`] reports them): the frame corners
+/// of a stacked image are the dark stacking edges, which is why sampling
+/// them produced arbitrary per-channel scalings. The offsets are add-only
+/// (channels are lifted to the highest background, nothing is pushed
+/// below zero), so signal above the sky keeps its channel differences
+/// exactly — the same neutralization the linked MTF stretch performs
+/// through its shadow offsets. A multiplicative balance is deliberately
+/// not applied here: after per-channel normalization the data carries no
+/// white reference a gain could be derived from, and scaling channels to
+/// equalize a background that gradient removal already pulled to the
+/// noise floor only amplified noise differences into a color cast.
+/// Mono images are returned untouched.
+pub fn color_calibrate(image: &mut Image, bounds: CropBounds) {
     if !image.is_color() {
         return;
     }
-    let (w, h) = (image.width(), image.height());
-    let corner = (h.min(w) / 20).max(10).min(w).min(h);
-    if corner == 0 {
+    let (top, bottom, left, right) = bounds;
+    if top + bottom >= image.height() || left + right >= image.width() {
         return;
     }
-
-    let medians: Vec<f64> = (0..3)
+    let backgrounds: Vec<f64> = (0..3)
         .map(|c| {
-            let ch = image.channel(c);
-            let mut samples = Vec::with_capacity(corner * corner * 4);
-            for (y0, y1, x0, x1) in [
-                (0, corner, 0, corner),
-                (0, corner, w - corner, w),
-                (h - corner, h, 0, corner),
-                (h - corner, h, w - corner, w),
-            ] {
-                for y in y0..y1 {
-                    for x in x0..x1 {
-                        samples.push(ch[y * w + x]);
-                    }
-                }
-            }
-            stats::median_in_place(&mut samples)
+            let mut interior = image.channel_interior(c, bounds);
+            stats::median_in_place(&mut interior)
         })
         .collect();
-
-    let target = medians.iter().sum::<f64>() / 3.0;
-    if target <= 0.0 {
+    if backgrounds.iter().any(|v| !v.is_finite()) {
         return;
     }
-    for (c, &m) in medians.iter().enumerate() {
-        if m > 0.0 {
-            let scale = target / m;
+    let target = backgrounds
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    for (c, &bg) in backgrounds.iter().enumerate() {
+        let offset = target - bg;
+        if offset > 0.0 {
             for v in image.channel_mut(c) {
-                *v = (*v * scale).clamp(0.0, 1.0);
+                *v = (*v + offset).min(1.0);
             }
         }
     }
 }
 
 /// Dim bright stars to emphasize nebulosity: detect luminance peaks above
-/// `threshold` (5×5 local maxima), grow them into star regions (3 rounds of
-/// 4-connected dilation), build a reduction map (stars → 0.7), smooth it
-/// (gaussian σ=2), and multiply it into every channel.
+/// `threshold` (5×5 local maxima) that also stand at least
+/// [`STAR_PROMINENCE`] above their surroundings, grow them into star
+/// regions (3 rounds of 4-connected dilation), build a reduction map
+/// (stars → 0.7), smooth it (gaussian σ=2), and multiply it into every
+/// channel.
+///
+/// The prominence test is what keeps a bright nebula core intact: inside
+/// a near-saturated core every noise ripple is a local maximum above the
+/// threshold, and dimming those speckled the core with gray dots. A star
+/// rises well above the 13×13 neighbourhood minimum; a ripple on a
+/// plateau does not.
 pub fn reduce_stars(image: &mut Image, threshold: f64) {
     let (w, h) = (image.width(), image.height());
     if w == 0 || h == 0 {
@@ -94,11 +103,13 @@ pub fn reduce_stars(image: &mut Image, threshold: f64) {
     }
     let lum = image.luminance();
 
-    let local_max = maximum_filter(&lum, w, h, 2);
-    let mut mask: Vec<bool> = lum
-        .iter()
-        .zip(&local_max)
-        .map(|(&v, &m)| v == m && v > threshold)
+    let local_max = extremum_filter(&lum, w, h, 2, f64::max, f64::NEG_INFINITY);
+    let local_min = extremum_filter(&lum, w, h, 6, f64::min, f64::INFINITY);
+    let mut mask: Vec<bool> = (0..w * h)
+        .map(|i| {
+            let v = lum[i];
+            v == local_max[i] && v > threshold && v - local_min[i] > STAR_PROMINENCE
+        })
         .collect();
     for _ in 0..3 {
         mask = dilate4(&mask, w, h);
@@ -114,29 +125,41 @@ pub fn reduce_stars(image: &mut Image, threshold: f64) {
     });
 }
 
-/// Square (2r+1)×(2r+1) maximum filter, clamp-to-edge. Separable: rows
-/// then columns.
-fn maximum_filter(data: &[f64], w: usize, h: usize, r: usize) -> Vec<f64> {
-    let mut rows = vec![f64::NEG_INFINITY; w * h];
+/// How far a peak must rise above its 13×13 neighbourhood minimum to count
+/// as a star rather than a ripple on bright nebulosity (display units).
+const STAR_PROMINENCE: f64 = 0.25;
+
+/// Square (2r+1)×(2r+1) running extremum (`pick` = `f64::max` or
+/// `f64::min`, `identity` its neutral element), clamp-to-edge. Separable:
+/// rows then columns.
+fn extremum_filter(
+    data: &[f64],
+    w: usize,
+    h: usize,
+    r: usize,
+    pick: fn(f64, f64) -> f64,
+    identity: f64,
+) -> Vec<f64> {
+    let mut rows = vec![identity; w * h];
     for y in 0..h {
         for x in 0..w {
             let x0 = x.saturating_sub(r);
             let x1 = (x + r + 1).min(w);
-            let mut m = f64::NEG_INFINITY;
+            let mut m = identity;
             for xi in x0..x1 {
-                m = m.max(data[y * w + xi]);
+                m = pick(m, data[y * w + xi]);
             }
             rows[y * w + x] = m;
         }
     }
-    let mut out = vec![f64::NEG_INFINITY; w * h];
+    let mut out = vec![identity; w * h];
     for y in 0..h {
         let y0 = y.saturating_sub(r);
         let y1 = (y + r + 1).min(h);
         for x in 0..w {
-            let mut m = f64::NEG_INFINITY;
+            let mut m = identity;
             for yi in y0..y1 {
-                m = m.max(rows[yi * w + x]);
+                m = pick(m, rows[yi * w + x]);
             }
             out[y * w + x] = m;
         }
@@ -231,14 +254,46 @@ mod tests {
     }
 
     #[test]
-    fn color_calibrate_neutralizes_corner_cast() {
-        // Flat background with a strong red cast
+    fn color_calibrate_neutralizes_cast_by_offset() {
+        // Flat background with a strong red cast and one white star
         let n = 64 * 64;
         let mut img = Image::new_rgb(64, 64, [vec![0.4; n], vec![0.2; n], vec![0.1; n]]);
-        color_calibrate(&mut img);
+        for c in 0..3 {
+            img.set(32, 32, c, img.get(32, 32, c) + 0.3);
+        }
+        color_calibrate(&mut img, (0, 0, 0, 0));
         let bg = |c: usize| img.get(2, 2, c);
         assert!((bg(0) - bg(1)).abs() < 1e-9);
         assert!((bg(1) - bg(2)).abs() < 1e-9);
+        // Add-only: channels rise to the red level, nothing is scaled
+        assert!((bg(0) - 0.4).abs() < 1e-9);
+        for c in 0..3 {
+            assert!((img.get(32, 32, c) - bg(c) - 0.3).abs() < 1e-9, "star delta channel {c}");
+        }
+    }
+
+    #[test]
+    fn color_calibrate_samples_the_interior_not_the_stacking_edges() {
+        // Neutral sky, but the top 8 rows and left 10 columns are dark
+        // stacking edges — and the edge is darker in blue than in red,
+        // exactly the kind of corner that used to drive the gains.
+        let (w, h) = (64usize, 64usize);
+        let mut img = Image::new_rgb(w, h, [vec![0.20; w * h], vec![0.20; w * h], vec![0.20; w * h]]);
+        for y in 0..h {
+            for x in 0..w {
+                if y < 8 || x < 10 {
+                    img.set(x, y, 0, 0.010);
+                    img.set(x, y, 1, 0.004);
+                    img.set(x, y, 2, 0.001);
+                }
+            }
+        }
+        let before = img.clone();
+        color_calibrate(&mut img, (8, 0, 10, 0));
+        // Interior was already neutral: nothing should move
+        for c in 0..3 {
+            assert_eq!(img.channel(c), before.channel(c), "channel {c} changed");
+        }
     }
 
     #[test]
@@ -251,6 +306,37 @@ mod tests {
         assert!(img.get(32, 32, 0) < 1.0, "star should be dimmed");
         // Far corner untouched (blurred mask never reaches it)
         assert!((img.get(2, 2, 0) - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn reduce_stars_leaves_a_bright_nebula_core_alone() {
+        // A saturated core (0.9 plateau with ±0.02 ripples) next to sky with
+        // one real star: only the star is dimmed
+        let (w, h) = (96usize, 64usize);
+        let mut data = vec![0.1; w * h];
+        for y in 8..56 {
+            for x in 8..48 {
+                data[y * w + x] = 0.9 + if (x + y) % 2 == 0 { 0.02 } else { -0.02 };
+            }
+        }
+        data[32 * w + 80] = 1.0;
+        let mut img = Image::new_mono(w, h, data.clone());
+        reduce_stars(&mut img, 0.8);
+        let out = img.channel(0);
+        assert!(out[32 * w + 80] < 1.0, "isolated star dimmed");
+        // The plateau's rim does look like a star edge (prominence against
+        // the sky), so check well inside it, beyond dilation + blur reach
+        for y in 24..42 {
+            for x in 24..34 {
+                // Within 1%: the rim detections' blur tail reaches this far
+                assert!(
+                    (out[y * w + x] - data[y * w + x]).abs() < 0.01,
+                    "core pixel ({x},{y}) changed: {} -> {}",
+                    data[y * w + x],
+                    out[y * w + x]
+                );
+            }
+        }
     }
 
     #[test]

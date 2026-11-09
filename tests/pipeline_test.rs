@@ -144,3 +144,35 @@ fn stretch_params_passthrough() {
     let dim = process(field.data.clone(), &with_bg(0.05));
     assert!(image_median(&bright) > image_median(&dim));
 }
+
+/// Color calibration with the Process defaults (statistical stretch) on a
+/// frame whose corners are dark stacking edges: the sky must come out
+/// neutral — the edges used to drive per-channel gains and tint it.
+#[test]
+fn color_calibration_neutralizes_sky_despite_dark_edges() {
+    let frame = full_frame();
+    let config = PipelineConfig {
+        color_calibration: true,
+        stretch: StretchAlgorithm::statistical(),
+        ..Default::default()
+    };
+    let result = process(frame.data.clone(), &config);
+    let w = result.width();
+    let h = result.height();
+    let medians: Vec<f64> = (0..3)
+        .map(|c| {
+            let ch = result.channel(c);
+            let mut interior = Vec::new();
+            for y in 24..h - 24 {
+                for x in 24..w - 24 {
+                    interior.push(ch[y * w + x]);
+                }
+            }
+            median(&interior)
+        })
+        .collect();
+    let spread = medians.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+        - medians.iter().copied().fold(f64::INFINITY, f64::min);
+    assert!(spread < 0.05, "channel medians {medians:?}");
+    assert_unit_range(&result);
+}

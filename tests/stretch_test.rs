@@ -190,3 +190,36 @@ fn saturate_noop_for_factor_one_and_mono() {
     processinator::saturate(&mut mono, 2.0);
     assert_eq!(mono.channel(0)[0], 0.5);
 }
+
+/// The statistical stretch lands the sky on its target median and keeps a
+/// dark lane visibly below the sky instead of lifting both to the same gray.
+#[test]
+fn statistical_hits_target_and_keeps_dark_lane_separated() {
+    let (w, h) = (128usize, 128usize);
+    let mut rng = TestRng::new(7);
+    let mut data = vec![0.0; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let base = if (50..70).contains(&y) { 0.094 } else { 0.100 };
+            data[y * w + x] = rng.normal(base, 0.002).clamp(0.0, 1.0);
+        }
+    }
+    let img = Image::new_mono(w, h, data);
+    let target = 0.15;
+    let out = stretch(
+        img,
+        &StretchOptions::new(StretchAlgorithm::Statistical {
+            target_median: target,
+            low_percentile: 0.5,
+            high_percentile: 99.9,
+        }),
+    );
+    let ch = out.channel(0);
+    let lane: Vec<f64> = (55..65).flat_map(|y| ch[y * w..(y + 1) * w].to_vec()).collect();
+    let sky: Vec<f64> = (90..100).flat_map(|y| ch[y * w..(y + 1) * w].to_vec()).collect();
+    let (lane_med, sky_med) = (median(&lane), median(&sky));
+    assert!((image_median(&out) - target).abs() < 0.03, "median {}", image_median(&out));
+    // A 6% dip in linear data stays a clear step after the stretch
+    assert!(sky_med - lane_med > 0.03, "sky {sky_med} vs lane {lane_med}");
+    assert_unit_range(&out);
+}
